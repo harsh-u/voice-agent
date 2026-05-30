@@ -90,6 +90,7 @@ class Call(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cost_cents: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    recording_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     agent_config: Mapped[Optional["AgentConfig"]] = relationship(
         "AgentConfig", back_populates="calls"

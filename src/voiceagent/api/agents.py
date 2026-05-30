@@ -118,14 +118,6 @@ async def list_models():
             "cost_per_min_cents": 1.80,
             "recommended": False,
         },
-        {
-            "id": "meta-llama/llama-4-scout-17b-16e-instruct",
-            "name": "Llama 4 Scout 17B (Balanced)",
-            "provider": "groq",
-            "ttft_ms": 150,
-            "cost_per_min_cents": 0.60,
-            "recommended": False,
-        },
     ]
 
 

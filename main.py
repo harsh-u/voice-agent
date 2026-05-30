@@ -41,6 +41,10 @@ app.include_router(agents.router)
 app.include_router(calls.router)
 app.include_router(webhooks.router)
 
+recordings_dir = Path("recordings")
+recordings_dir.mkdir(exist_ok=True)
+app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
+
 web_dir = Path("web")
 if web_dir.exists():
     app.mount("/", StaticFiles(directory="web", html=True), name="web")

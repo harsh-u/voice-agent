@@ -55,6 +55,7 @@ class CallSummary(BaseModel):
     ended_at: Optional[datetime]
     duration_seconds: Optional[int]
     cost_cents: Optional[float]
+    recording_url: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -86,12 +87,19 @@ async def create_outbound_call(
     Creates a LiveKit room, inserts a Call record, dials the SIP leg, then
     spawns a background asyncio task to run the voice pipeline.
     """
-    # Validate agent config if provided
-    agent_config: AgentConfig | None = None
+    # Validate agent config if provided, snapshot to a plain dict so the
+    # background task doesn't reach back into a closed session.
+    agent_cfg: dict | None = None
     if body.agent_config_id:
-        agent_config = await session.get(AgentConfig, body.agent_config_id)
-        if not agent_config:
+        ac = await session.get(AgentConfig, body.agent_config_id)
+        if not ac:
             raise HTTPException(status_code=404, detail="Agent config not found")
+        agent_cfg = {
+            "id": ac.id,
+            "system_prompt": ac.system_prompt,
+            "voice_id": ac.voice_id,
+            "llm_model": ac.llm_model,
+        }
 
     room_name = f"call-{uuid.uuid4().hex[:12]}"
     call_id = str(uuid.uuid4())
@@ -127,8 +135,11 @@ async def create_outbound_call(
         raise HTTPException(status_code=502, detail=f"SIP dial failed: {exc}")
 
     # Run the voice pipeline as a background task — detached from this request
-    asyncio.create_task(run_agent(call_id, room_name, agent_config))
-    logger.info(f"Outbound call {call_id} → {body.to_number} — pipeline task spawned")
+    asyncio.create_task(run_agent(call_id, room_name, agent_cfg))
+    logger.info(
+        f"Outbound call {call_id} → {body.to_number} — pipeline task spawned "
+        f"(agent_config_id={body.agent_config_id})"
+    )
 
     return OutboundCallResponse(
         call_id=call_id,

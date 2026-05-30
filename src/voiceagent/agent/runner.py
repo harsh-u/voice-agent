@@ -1,10 +1,9 @@
-import asyncio
 from datetime import datetime, UTC
 
 from loguru import logger
 
 from voiceagent.config import settings
-from voiceagent.db.models import Call, TranscriptTurn, AgentConfig, CallStatus
+from voiceagent.db.models import Call, TranscriptTurn, CallStatus
 from voiceagent.db.session import AsyncSessionLocal
 from voiceagent.pipeline.bot import run_pipeline
 from voiceagent.telephony.livekit_sip import generate_bot_token
@@ -14,33 +13,37 @@ from voiceagent.agent.prompts import build_system_prompt
 async def run_agent(
     call_id: str,
     room_name: str,
-    agent_config: AgentConfig | None,
+    agent_config: dict | None,
 ) -> None:
     """Per-call orchestrator that connects the pipeline to a LiveKit room and
-    persists the resulting transcript and cost data.
+    persists the resulting transcript, recording, and cost data.
 
     Args:
         call_id: Primary key of the Call record to update.
         room_name: LiveKit room the bot should join.
-        agent_config: Optional AgentConfig driving prompt and voice choices.
+        agent_config: Optional plain dict with keys system_prompt, voice_id,
+            llm_model. Passing a dict (not the SQLAlchemy ORM object) keeps
+            this safe to run as a detached background task.
     """
-    system_prompt = build_system_prompt(
-        agent_config.system_prompt if agent_config else None
-    )
-    voice_id = (
-        agent_config.voice_id if agent_config and agent_config.voice_id
-        else settings.cartesia_voice_id
-    )
-    llm_model = (
-        agent_config.llm_model if agent_config and agent_config.llm_model
-        else settings.groq_model
-    )
+    cfg = agent_config or {}
+    system_prompt = build_system_prompt(cfg.get("system_prompt"))
+    voice_id = cfg.get("voice_id") or settings.cartesia_voice_id
+    llm_model = cfg.get("llm_model") or settings.groq_model
     bot_token = generate_bot_token(room_name)
 
+    logger.info(
+        f"run_agent call_id={call_id} room={room_name} "
+        f"agent_id={cfg.get('id')} voice={voice_id} model={llm_model}"
+    )
+
     turns: list[tuple[str, str, int | None]] = []
+    recording_url_holder: list[str | None] = [None]
 
     async def on_turn_end(role: str, text: str, latency_ms: int | None) -> None:
         turns.append((role, text, latency_ms))
+
+    async def on_recording_saved(relative_url: str) -> None:
+        recording_url_holder[0] = relative_url
 
     try:
         async with AsyncSessionLocal() as session:
@@ -51,26 +54,27 @@ async def run_agent(
                 logger.info(f"Call {call_id} marked active")
 
         await run_pipeline(
+            call_id=call_id,
             room_name=room_name,
             bot_token=bot_token,
             system_prompt=system_prompt,
             voice_id=voice_id,
             llm_model=llm_model,
             on_turn_end=on_turn_end,
+            on_recording_saved=on_recording_saved,
         )
     except Exception as exc:
         logger.error(f"Pipeline error call_id={call_id}: {exc}")
     finally:
-        await _finalize_call(call_id, turns)
+        await _finalize_call(call_id, turns, recording_url_holder[0])
 
 
-async def _finalize_call(call_id: str, turns: list[tuple]) -> None:
-    """Write final call metadata and transcript turns to the database.
-
-    Args:
-        call_id: Primary key of the Call to finalize.
-        turns: List of (role, text, latency_ms) tuples collected during the call.
-    """
+async def _finalize_call(
+    call_id: str,
+    turns: list[tuple],
+    recording_url: str | None,
+) -> None:
+    """Write final call metadata, transcript turns, and recording URL to DB."""
     async with AsyncSessionLocal() as session:
         call = await session.get(Call, call_id)
         if not call:
@@ -91,6 +95,8 @@ async def _finalize_call(call_id: str, turns: list[tuple]) -> None:
             call.cost_cents = round((call.duration_seconds / 60) * total_cpm, 4)
 
         call.status = CallStatus.completed
+        if recording_url:
+            call.recording_url = recording_url
 
         for role, text, latency_ms in turns:
             session.add(
@@ -105,5 +111,5 @@ async def _finalize_call(call_id: str, turns: list[tuple]) -> None:
         await session.commit()
         logger.info(
             f"Call {call_id} finalized — duration={call.duration_seconds}s "
-            f"cost={call.cost_cents}¢ turns={len(turns)}"
+            f"cost={call.cost_cents}¢ turns={len(turns)} recording={recording_url}"
         )
