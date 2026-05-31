@@ -7,11 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, AsyncSession as _AS
 from loguru import logger
 
-from voiceagent.db.models import Call, CallDirection, CallStatus, AgentConfig, TranscriptTurn
-from voiceagent.db.session import get_session
+from voiceagent.db.models import (
+    Call, CallDirection, CallStatus, AgentConfig, TranscriptTurn,
+    Contact, Conversation, ConversationStatus, Message, MessageDirection,
+    MessageType, MessageStatus,
+)
+from voiceagent.db.session import get_session, AsyncSessionLocal
 from voiceagent.telephony.livekit_sip import create_room, dial_outbound
 from voiceagent.agent.runner import run_agent
 
@@ -26,6 +30,7 @@ router = APIRouter(prefix="/calls", tags=["calls"])
 class OutboundCallRequest(BaseModel):
     to_number: str
     agent_config_id: Optional[str] = None
+    contact_id: Optional[str] = None  # CRM contact to link this call to
 
 
 class OutboundCallResponse(BaseModel):
@@ -116,6 +121,7 @@ async def create_outbound_call(
     call = Call(
         id=call_id,
         agent_config_id=body.agent_config_id,
+        contact_id=body.contact_id,
         direction=CallDirection.outbound,
         status=CallStatus.dialing,
         to_number=body.to_number,
@@ -205,8 +211,78 @@ async def hangup_call(
         return call
 
     call.status = CallStatus.completed
+    now = datetime.now(UTC)
     if not call.ended_at:
-        call.ended_at = datetime.now(UTC)
+        call.ended_at = now
+    if call.started_at and call.ended_at:
+        delta = call.ended_at - call.started_at
+        call.duration_seconds = int(delta.total_seconds())
     await session.commit()
     await session.refresh(call)
+
+    # Write post-call note to WhatsApp conversation if linked to a contact
+    if call.contact_id:
+        asyncio.create_task(_post_call_note(call_id))
+
     return call
+
+
+async def _post_call_note(call_id: str):
+    """After a call completes, write a note into the contact's WhatsApp conversation."""
+    async with AsyncSessionLocal() as session:
+        call = await session.get(Call, call_id, options=[selectinload(Call.turns)])
+        if not call or not call.contact_id:
+            return
+
+        contact_q = await session.execute(
+            select(Contact).where(Contact.id == call.contact_id)
+        )
+        contact = contact_q.scalar_one_or_none()
+        if not contact:
+            return
+
+        # Find or create an open conversation for this contact
+        conv_q = await session.execute(
+            select(Conversation)
+            .where(
+                Conversation.contact_id == contact.id,
+                Conversation.status != ConversationStatus.closed,
+            )
+            .order_by(Conversation.created_at.desc())
+            .limit(1)
+        )
+        conv = conv_q.scalar_one_or_none()
+        if not conv:
+            conv = Conversation(
+                contact_id=contact.id,
+                user_id=contact.user_id,
+                status=ConversationStatus.open,
+            )
+            session.add(conv)
+            await session.flush()
+
+        # Build note content from transcript summary (last 5 turns)
+        recent_turns = sorted(call.turns or [], key=lambda t: t.started_at)[-5:]
+        transcript_snippet = "\n".join(
+            f"{t.role.upper()}: {t.text}" for t in recent_turns
+        )
+        duration_str = f"{call.duration_seconds or 0}s"
+        note_text = (
+            f"📞 Voice call completed ({duration_str})\n"
+            f"Direction: {call.direction}\n"
+            f"{'Number: ' + (call.from_number or call.to_number or 'unknown')}\n"
+        )
+        if transcript_snippet:
+            note_text += f"\nTranscript (last {len(recent_turns)} turns):\n{transcript_snippet}"
+
+        note = Message(
+            conversation_id=conv.id,
+            direction=MessageDirection.outbound,
+            type=MessageType.note,
+            content={"text": note_text, "call_id": call_id},
+            status=MessageStatus.sent,
+        )
+        session.add(note)
+        conv.last_message_at = datetime.now(UTC)
+        await session.commit()
+        logger.info(f"Post-call note written for call {call_id} → conversation {conv.id}")

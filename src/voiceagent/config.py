@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     cost_tts_cpm: float = 2.40
     cost_telephony_cpm: float = 0.45
 
+    # Auth (JWT)
+    jwt_secret: str = "change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_access_expire_minutes: int = 60
+    jwt_refresh_expire_days: int = 7
+
+    # WhatsApp / Meta
+    meta_app_secret: str = ""  # for webhook HMAC verification
+    # AES-256-GCM key (64 hex chars) for encrypting access tokens at rest
+    encryption_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
