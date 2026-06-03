@@ -26,6 +26,10 @@ class DashboardMetrics(BaseModel):
     calls_today: int
     active_calls: int
     avg_call_duration_seconds: float
+    # Voice cost & performance
+    voice_spend_today_cents: float
+    voice_answer_rate: float    # completed / (completed + failed) outbound calls today
+    outbound_calls_today: int
 
 
 @router.get("/metrics", response_model=DashboardMetrics)
@@ -82,7 +86,7 @@ async def get_metrics(
         .where(Pipeline.user_id == current_user.id, Deal.status == DealStatus.open)
     )
 
-    # Voice calls today (calls linked to this user's contacts)
+    # Voice calls today
     calls_today = await session.execute(
         select(func.count(Call.id)).where(Call.started_at >= today)
     )
@@ -95,6 +99,35 @@ async def get_metrics(
             Call.started_at >= today,
         )
     )
+    # Voice spend today
+    spend_today_q = await session.execute(
+        select(func.coalesce(func.sum(Call.cost_cents), 0.0)).where(
+            Call.started_at >= today
+        )
+    )
+    # Answer rate: completed outbound / (completed + failed) outbound today
+    completed_out_q = await session.execute(
+        select(func.count(Call.id)).where(
+            Call.started_at >= today,
+            Call.status == CallStatus.completed,
+        )
+    )
+    failed_out_q = await session.execute(
+        select(func.count(Call.id)).where(
+            Call.started_at >= today,
+            Call.status.in_([CallStatus.failed]),
+        )
+    )
+    outbound_today_q = await session.execute(
+        select(func.count(Call.id)).where(
+            Call.started_at >= today,
+            Call.direction == "outbound",
+        )
+    )
+    completed_out = completed_out_q.scalar() or 0
+    failed_out = failed_out_q.scalar() or 0
+    denom = completed_out + failed_out
+    answer_rate = round(completed_out / denom * 100, 1) if denom > 0 else 0.0
 
     return DashboardMetrics(
         conversations_today=conv_today.scalar() or 0,
@@ -106,4 +139,7 @@ async def get_metrics(
         calls_today=calls_today.scalar() or 0,
         active_calls=active_calls.scalar() or 0,
         avg_call_duration_seconds=float(avg_duration_q.scalar() or 0),
+        voice_spend_today_cents=float(spend_today_q.scalar() or 0),
+        voice_answer_rate=answer_rate,
+        outbound_calls_today=outbound_today_q.scalar() or 0,
     )

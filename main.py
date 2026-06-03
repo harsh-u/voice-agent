@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from voiceagent.api import agents, calls, webhooks
-from voiceagent.api import auth, contacts, conversations, messages, whatsapp, pipelines, broadcasts, dashboard, flows, automations
+from voiceagent.api import auth, contacts, conversations, messages, whatsapp, pipelines, broadcasts, dashboard, flows, automations, voice_settings
 from voiceagent.db.session import create_tables
 
 
@@ -58,6 +58,7 @@ app.include_router(broadcasts.router)
 app.include_router(flows.router)
 app.include_router(automations.router)
 app.include_router(dashboard.router)
+app.include_router(voice_settings.router)
 
 # Static file mounts
 recordings_dir = Path("recordings")

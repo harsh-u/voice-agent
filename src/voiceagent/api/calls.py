@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +15,7 @@ from voiceagent.db.models import (
     Contact, Conversation, ConversationStatus, Message, MessageDirection,
     MessageType, MessageStatus,
 )
+from voiceagent.config import settings
 from voiceagent.db.session import get_session, AsyncSessionLocal
 from voiceagent.telephony.livekit_sip import create_room, dial_outbound
 from voiceagent.agent.runner import run_agent
@@ -61,12 +62,31 @@ class CallSummary(BaseModel):
     duration_seconds: Optional[int]
     cost_cents: Optional[float]
     recording_url: Optional[str] = None
+    # Enriched fields (populated by list endpoints)
+    agent_config_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    contact_id: Optional[str] = None
+    contact_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
 
+class ActiveCallDetail(BaseModel):
+    """Live call card — shown on the monitoring widget."""
+    id: str
+    direction: str
+    status: str
+    to_number: Optional[str]
+    from_number: Optional[str]
+    started_at: Optional[datetime]
+    live_duration_seconds: int
+    estimated_cost_cents: float
+    agent_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_id: Optional[str] = None
+
+
 class CallDetail(CallSummary):
-    agent_config_id: Optional[str]
     turns: list[TranscriptTurnResponse]
 
 
@@ -154,19 +174,59 @@ async def create_outbound_call(
     )
 
 
+@router.get("/active", response_model=list[ActiveCallDetail])
+async def list_active_calls(session: AsyncSession = Depends(get_session)):
+    """Return all currently active or dialing calls — used for live monitoring."""
+    result = await session.execute(
+        select(Call)
+        .where(Call.status.in_([CallStatus.active, CallStatus.dialing]))
+        .options(selectinload(Call.agent_config), selectinload(Call.contact))
+        .order_by(Call.started_at.asc())
+    )
+    calls = result.scalars().all()
+    now = datetime.now(UTC)
+    # Total cost per minute in dollars → convert to cents per second
+    total_cpm = settings.cost_stt_cpm + settings.cost_llm_cpm + settings.cost_tts_cpm + settings.cost_telephony_cpm
+    cost_per_sec = total_cpm / 60.0
+
+    out = []
+    for c in calls:
+        if c.started_at:
+            secs = int((now - c.started_at).total_seconds())
+        else:
+            secs = 0
+        out.append(ActiveCallDetail(
+            id=c.id,
+            direction=str(c.direction.value) if hasattr(c.direction, "value") else str(c.direction),
+            status=str(c.status.value) if hasattr(c.status, "value") else str(c.status),
+            to_number=c.to_number,
+            from_number=c.from_number,
+            started_at=c.started_at,
+            live_duration_seconds=secs,
+            estimated_cost_cents=round(secs * cost_per_sec, 3),
+            agent_name=c.agent_config.name if c.agent_config else None,
+            contact_name=c.contact.name if c.contact else None,
+            contact_id=c.contact_id,
+        ))
+    return out
+
+
 @router.get("", response_model=PaginatedCalls)
 async def list_calls(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     status: Optional[str] = Query(default=None, description="Filter by status: dialing, active, completed, failed"),
+    agent_id: Optional[str] = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ):
-    """Return a paginated list of calls (most recent first). Optionally filter by status."""
+    """Return a paginated list of calls (most recent first) with agent + contact names."""
     offset = (page - 1) * limit
 
     base_query = select(Call)
     if status:
         base_query = base_query.where(Call.status == status)
+    if agent_id:
+        base_query = base_query.where(Call.agent_config_id == agent_id)
 
     total_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -174,9 +234,22 @@ async def list_calls(
     total = total_result.scalar_one()
 
     result = await session.execute(
-        base_query.order_by(Call.started_at.desc()).offset(offset).limit(limit)
+        base_query
+        .options(selectinload(Call.agent_config), selectinload(Call.contact))
+        .order_by(Call.started_at.desc())
+        .offset(offset)
+        .limit(limit)
     )
-    items = result.scalars().all()
+    items_raw = result.scalars().all()
+
+    items = []
+    for c in items_raw:
+        s = CallSummary.model_validate(c)
+        s.agent_name = c.agent_config.name if c.agent_config else None
+        s.agent_config_id = c.agent_config_id
+        s.contact_name = c.contact.name if c.contact else None
+        s.contact_id = c.contact_id
+        items.append(s)
 
     return PaginatedCalls(total=total, page=page, limit=limit, items=items)
 

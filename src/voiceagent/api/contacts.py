@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from voiceagent.api.auth import get_current_user
-from voiceagent.db.models import Contact, ContactTag, Tag, User
+from voiceagent.db.models import Contact, ContactTag, Tag, User, Call, AgentConfig
 from voiceagent.db.session import get_session
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -255,3 +255,43 @@ async def delete_tag(
     tag = await _get_tag(tag_id, current_user.id, session)
     await session.delete(tag)
     await session.commit()
+
+# ---------------------------------------------------------------------------
+# Contact Call History
+# ---------------------------------------------------------------------------
+
+@router.get("/{contact_id}/calls")
+async def get_contact_calls(
+    contact_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """All voice calls linked to this contact, newest first."""
+    await _get_contact(contact_id, current_user.id, session)
+
+    result = await session.execute(
+        select(Call)
+        .where(Call.contact_id == contact_id)
+        .options(selectinload(Call.turns), selectinload(Call.agent_config))
+        .order_by(Call.started_at.desc())
+    )
+    calls = result.scalars().all()
+
+    out = []
+    for c in calls:
+        out.append({
+            "id": c.id,
+            "direction": str(c.direction.value) if hasattr(c.direction, "value") else str(c.direction),
+            "status": str(c.status.value) if hasattr(c.status, "value") else str(c.status),
+            "from_number": c.from_number,
+            "to_number": c.to_number,
+            "started_at": c.started_at.isoformat() if c.started_at else None,
+            "ended_at": c.ended_at.isoformat() if c.ended_at else None,
+            "duration_seconds": c.duration_seconds,
+            "cost_cents": c.cost_cents,
+            "recording_url": c.recording_url,
+            "agent_name": c.agent_config.name if c.agent_config else None,
+            "transcript_count": len(c.turns),
+            "turns": [{"id": t.id, "role": t.role, "text": t.text, "started_at": t.started_at.isoformat()} for t in c.turns],
+        })
+    return out

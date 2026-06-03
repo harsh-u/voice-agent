@@ -26,6 +26,10 @@ class BroadcastCreate(BaseModel):
     template_id: Optional[str] = None
     contact_ids: list[str]
     scheduled_at: Optional[datetime] = None
+    # Voice broadcast fields
+    broadcast_type: str = "whatsapp"  # "whatsapp" | "voice" | "sequence"
+    agent_config_id: Optional[str] = None  # for voice broadcasts
+    max_retries: int = 1  # voice: retry if no answer
 
 
 class BroadcastResponse(BaseModel):
@@ -36,6 +40,7 @@ class BroadcastResponse(BaseModel):
     failed_count: int
     scheduled_at: Optional[datetime] = None
     created_at: datetime
+    broadcast_type: str = "whatsapp"
 
     model_config = {"from_attributes": True}
 
@@ -80,9 +85,28 @@ async def create_broadcast(
     await session.commit()
     await session.refresh(broadcast)
 
-    # If no schedule, send immediately in background
+    # Dispatch immediately if not scheduled
     if not payload.scheduled_at:
-        background_tasks.add_task(_send_broadcast, broadcast.id, current_user.id)
+        if payload.broadcast_type == "voice":
+            background_tasks.add_task(
+                _send_voice_broadcast,
+                broadcast.id,
+                current_user.id,
+                payload.agent_config_id,
+                payload.max_retries,
+            )
+        elif payload.broadcast_type == "sequence":
+            # WhatsApp first, then voice follow-up
+            background_tasks.add_task(_send_broadcast, broadcast.id, current_user.id)
+            background_tasks.add_task(
+                _send_voice_broadcast,
+                broadcast.id,
+                current_user.id,
+                payload.agent_config_id,
+                payload.max_retries,
+            )
+        else:
+            background_tasks.add_task(_send_broadcast, broadcast.id, current_user.id)
 
     return broadcast
 
@@ -190,3 +214,86 @@ async def _send_broadcast(broadcast_id: str, user_id: str):
         bc.status = BroadcastStatus.completed
         await session.commit()
         logger.info(f"Broadcast {broadcast_id} complete: sent={bc.sent_count} failed={bc.failed_count}")
+
+async def _send_voice_broadcast(
+    broadcast_id: str,
+    user_id: str,
+    agent_config_id: Optional[str],
+    max_retries: int = 1,
+):
+    """Dispatch outbound voice calls to all recipients of a broadcast."""
+    from voiceagent.telephony.livekit_sip import create_room, dial_outbound
+    from voiceagent.agent.runner import run_agent
+    from voiceagent.db.models import AgentConfig, Call, CallDirection, CallStatus
+    import uuid
+
+    async with AsyncSessionLocal() as session:
+        bc_q = await session.execute(select(Broadcast).where(Broadcast.id == broadcast_id))
+        bc = bc_q.scalar_one_or_none()
+        if not bc:
+            return
+
+        bc.status = BroadcastStatus.sending
+        await session.commit()
+
+        # Load agent config
+        agent_cfg = None
+        if agent_config_id:
+            ac = await session.get(AgentConfig, agent_config_id)
+            if ac:
+                agent_cfg = {"id": ac.id, "system_prompt": ac.system_prompt, "voice_id": ac.voice_id, "llm_model": ac.llm_model}
+
+        # Get all pending recipients
+        recips_q = await session.execute(
+            select(BroadcastRecipient).where(BroadcastRecipient.broadcast_id == broadcast_id)
+        )
+        recipients = list(recips_q.scalars().all())
+
+        for recipient in recipients:
+            contact_q = await session.execute(select(Contact).where(Contact.id == recipient.contact_id))
+            contact = contact_q.scalar_one_or_none()
+            if not contact or not contact.phone:
+                recipient.status = MessageStatus.failed
+                recipient.error = "No phone number"
+                bc.failed_count += 1
+                continue
+
+            for attempt in range(max(1, max_retries)):
+                try:
+                    room_name = f"bc-{uuid.uuid4().hex[:10]}"
+                    call_id = str(uuid.uuid4())
+                    from datetime import UTC
+                    now = __import__("datetime").datetime.now(UTC)
+
+                    await create_room(room_name)
+
+                    call = Call(
+                        id=call_id,
+                        agent_config_id=agent_config_id,
+                        contact_id=contact.id,
+                        direction=CallDirection.outbound,
+                        status=CallStatus.dialing,
+                        to_number=contact.phone,
+                        livekit_room_name=room_name,
+                        started_at=now,
+                    )
+                    session.add(call)
+                    await session.flush()
+
+                    await dial_outbound(contact.phone, room_name)
+                    asyncio.create_task(run_agent(call_id, room_name, agent_cfg))
+
+                    recipient.status = MessageStatus.sent
+                    bc.sent_count += 1
+                    logger.info(f"Voice broadcast {broadcast_id}: called {contact.phone} (call={call_id})")
+                    break
+                except Exception as e:
+                    logger.error(f"Voice broadcast {broadcast_id}: call to {contact.phone} failed (attempt {attempt+1}): {e}")
+                    if attempt == max_retries - 1:
+                        recipient.status = MessageStatus.failed
+                        recipient.error = str(e)
+                        bc.failed_count += 1
+
+        bc.status = BroadcastStatus.completed
+        await session.commit()
+        logger.info(f"Voice broadcast {broadcast_id} done: sent={bc.sent_count} failed={bc.failed_count}")
