@@ -1,7 +1,7 @@
 """Messages send/list + SSE realtime stream."""
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -126,19 +126,44 @@ async def send_message(
                 )
 
             wa_msgs = wa_resp.get("messages", []) if isinstance(wa_resp, dict) else []
-            if wa_msgs:
-                msg.wa_message_id = wa_msgs[0].get("id")
-            msg.status = MessageStatus.sent
-            from datetime import UTC
-            conv.last_message_at = datetime.now(UTC)
+            wa_id = wa_msgs[0].get("id") if wa_msgs else None
+
+            # Use raw SQL UPDATE to avoid stale-object issues with the session
+            from sqlalchemy import update as sa_update
+            now = datetime.now(UTC)
+            await session.execute(
+                sa_update(Message)
+                .where(Message.id == msg.id)
+                .values(wa_message_id=wa_id, status=MessageStatus.sent)
+            )
+            await session.execute(
+                sa_update(Conversation)
+                .where(Conversation.id == conv.id)
+                .values(last_message_at=now)
+            )
             await session.commit()
-            await session.refresh(msg)
-            logger.info(f"Sent message {msg.id} via WhatsApp")
+            logger.info(f"Sent message {msg.id} via WhatsApp (wa_id={wa_id})")
+            # Return a clean response dict — don't try to re-fetch from session to avoid stale errors
+            return {
+                "id": msg.id,
+                "conversation_id": conv.id,
+                "direction": "outbound",
+                "type": str(payload.type.value) if hasattr(payload.type, "value") else str(payload.type),
+                "content": payload.content,
+                "status": "sent",
+                "wa_message_id": wa_id,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
         except Exception as e:
-            msg.status = MessageStatus.failed
-            await session.commit()
-            await session.refresh(msg)
             logger.error(f"WhatsApp send failed for message {msg.id}: {e}")
+            try:
+                from sqlalchemy import update as sa_update2
+                await session.execute(
+                    sa_update2(Message).where(Message.id == msg.id).values(status=MessageStatus.failed)
+                )
+                await session.commit()
+            except Exception:
+                pass
             raise HTTPException(502, f"WhatsApp send failed: {e}")
     else:
         logger.warning(f"No WhatsApp config for user {current_user.id}; message {msg.id} pending")

@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     # Auth (JWT)
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    jwt_access_expire_minutes: int = 60
-    jwt_refresh_expire_days: int = 7
+    jwt_access_expire_minutes: int = 1440   # 24 hours
+    jwt_refresh_expire_days: int = 30       # 30 days
 
     # WhatsApp / Meta
     meta_app_secret: str = ""  # for webhook HMAC verification
