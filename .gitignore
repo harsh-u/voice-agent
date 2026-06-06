@@ -14,3 +14,14 @@ wheels/
 
 # Local Claude Code settings
 .claude/
+
+# Call recordings and media uploads
+recordings/
+media/
+
+# Next.js build output
+frontend/.next/
+frontend/node_modules/
+
+# OS
+.DS_Store
