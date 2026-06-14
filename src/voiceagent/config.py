@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     cost_tts_cpm: float = 2.40
     cost_telephony_cpm: float = 0.45
 
+    # Observability (Convoxio Scope)
+    voxscope_url: str = "http://localhost:8001"
+    voxscope_api_key: str = ""
+
+    # RAG (VoiceRAG)
+    rag_base_url: str = "http://localhost:8000"
+
     # Auth (JWT)
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
