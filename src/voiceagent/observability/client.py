@@ -62,7 +62,7 @@ async def ingest_call(
             resp = await client.post(
                 f"{settings.voxscope_url.rstrip('/')}/v1/ingest/batch",
                 json=batch,
-                headers={"X-API-Key": settings.voxscope_api_key},
+                headers={"Authorization": f"Bearer {settings.voxscope_api_key}"},
             )
             if resp.status_code == 202:
                 logger.info(f"[observability] ingested call {call_id} — {len(turns)} turns")

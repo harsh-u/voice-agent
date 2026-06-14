@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from voiceagent.api import agents, calls, webhooks
 from voiceagent.api import auth, contacts, conversations, messages, whatsapp, pipelines, broadcasts, dashboard, flows, automations, voice_settings
+from voiceagent.api import knowledge
 from voiceagent.db.session import create_tables
 
 
@@ -41,6 +42,7 @@ async def health():
 app.include_router(agents.router)
 app.include_router(calls.router)
 app.include_router(webhooks.router)
+app.include_router(knowledge.router)
 
 # Auth
 app.include_router(auth.router)

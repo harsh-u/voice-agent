@@ -27,6 +27,7 @@ class AgentConfigCreate(BaseModel):
     tools_json: Optional[str] = None
     sip_trunk_id: Optional[str] = None
     rag_api_key: Optional[str] = None
+    rag_kb_id: Optional[str] = None
 
 
 class AgentConfigUpdate(BaseModel):
@@ -37,6 +38,7 @@ class AgentConfigUpdate(BaseModel):
     tools_json: Optional[str] = None
     sip_trunk_id: Optional[str] = None
     rag_api_key: Optional[str] = None
+    rag_kb_id: Optional[str] = None
 
 
 class AgentConfigResponse(BaseModel):
@@ -48,6 +50,7 @@ class AgentConfigResponse(BaseModel):
     tools_json: Optional[str]
     sip_trunk_id: Optional[str]
     rag_api_key: Optional[str]
+    rag_kb_id: Optional[str]
     created_at: datetime
     updated_at: datetime
 
@@ -82,6 +85,7 @@ async def create_agent(
         tools_json=body.tools_json,
         sip_trunk_id=body.sip_trunk_id or settings.livekit_sip_trunk_id,
         rag_api_key=body.rag_api_key,
+        rag_kb_id=body.rag_kb_id,
         created_at=now,
         updated_at=now,
     )
