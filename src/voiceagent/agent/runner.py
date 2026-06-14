@@ -8,6 +8,7 @@ from voiceagent.db.session import AsyncSessionLocal
 from voiceagent.pipeline.bot import run_pipeline
 from voiceagent.telephony.livekit_sip import generate_bot_token
 from voiceagent.agent.prompts import build_system_prompt
+from voiceagent.observability.client import ingest_call
 
 
 async def run_agent(
@@ -29,6 +30,7 @@ async def run_agent(
     system_prompt = build_system_prompt(cfg.get("system_prompt"))
     voice_id = cfg.get("voice_id") or settings.cartesia_voice_id
     llm_model = cfg.get("llm_model") or settings.groq_model
+    rag_api_key = cfg.get("rag_api_key") or None
     bot_token = generate_bot_token(room_name)
 
     logger.info(
@@ -62,19 +64,31 @@ async def run_agent(
             llm_model=llm_model,
             on_turn_end=on_turn_end,
             on_recording_saved=on_recording_saved,
+            rag_api_key=rag_api_key,
         )
     except Exception as exc:
         logger.error(f"Pipeline error call_id={call_id}: {exc}")
     finally:
-        await _finalize_call(call_id, turns, recording_url_holder[0])
+        await _finalize_call(call_id, turns, recording_url_holder[0], cfg, voice_id, llm_model)
 
 
 async def _finalize_call(
     call_id: str,
     turns: list[tuple],
     recording_url: str | None,
+    cfg: dict,
+    voice_id: str,
+    llm_model: str,
 ) -> None:
-    """Write final call metadata, transcript turns, and recording URL to DB."""
+    """Write final call metadata, transcript turns, and recording URL to DB.
+    Then ship observability data to Convoxio Scope (fire-and-forget).
+    """
+    started_at_val = None
+    ended_at_val = None
+    direction_val = "outbound"
+    from_number_val = None
+    to_number_val = None
+
     async with AsyncSessionLocal() as session:
         call = await session.get(Call, call_id)
         if not call:
@@ -109,7 +123,28 @@ async def _finalize_call(
             )
 
         await session.commit()
+        # Snapshot for observability (after commit so values are final)
+        started_at_val = call.started_at
+        ended_at_val = call.ended_at
+        direction_val = call.direction
+        from_number_val = call.from_number
+        to_number_val = call.to_number
+
         logger.info(
             f"Call {call_id} finalized — duration={call.duration_seconds}s "
             f"cost={call.cost_cents}¢ turns={len(turns)} recording={recording_url}"
         )
+
+    # Ship to observability (non-blocking; errors are logged inside ingest_call)
+    await ingest_call(
+        call_id=call_id,
+        agent_config_id=cfg.get("id"),
+        direction=direction_val,
+        from_number=from_number_val,
+        to_number=to_number_val,
+        started_at=started_at_val,
+        ended_at=ended_at_val,
+        turns=turns,
+        llm_model=llm_model,
+        voice_id=voice_id,
+    )

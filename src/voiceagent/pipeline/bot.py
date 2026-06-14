@@ -22,6 +22,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 
+from voiceagent.agent.tools import build_tools
 from voiceagent.config import settings
 
 
@@ -38,6 +39,7 @@ async def run_pipeline(
     llm_model: str,
     on_turn_end: Callable[[str, str, int | None], Any] | None = None,
     on_recording_saved: Callable[[str], Awaitable[None]] | None = None,
+    rag_api_key: str | None = None,
 ) -> None:
     """Build and run a Pipecat voice pipeline connected to a LiveKit room.
 
@@ -92,7 +94,21 @@ async def run_pipeline(
 
     context = LLMContext()
     context.set_messages([{"role": "system", "content": system_prompt}])
+    context.set_tools(build_tools(rag_enabled=bool(rag_api_key)))
     context_pair = LLMContextAggregatorPair(context)
+
+    # Register RAG handler when the agent has a knowledge base configured
+    if rag_api_key:
+        from voiceagent.rag.client import query as rag_query
+        from pipecat.services.llm_service import FunctionCallParams
+
+        async def _rag_handler(params: FunctionCallParams) -> None:
+            question = params.arguments.get("question", "")
+            logger.info(f"[rag] query: {question[:80]}")
+            answer = await rag_query(question, rag_api_key)
+            await params.result_callback(answer)
+
+        llm.register_function("query_knowledge_base", _rag_handler)
 
     transcript_collector = LLMFullResponseAggregator()
 

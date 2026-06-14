@@ -621,6 +621,7 @@ class AgentConfig(Base):
     llm_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     tools_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sip_trunk_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    rag_api_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=lambda: datetime.now(UTC), nullable=False
     )
