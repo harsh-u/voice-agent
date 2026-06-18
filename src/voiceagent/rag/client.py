@@ -27,6 +27,9 @@ async def query(question: str, api_key: str) -> str:
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            # rag_base_url points at the unified backend's mounted RAG module
+            # (e.g. http://localhost:8000/rag); the worker is a separate process
+            # so this stays an HTTP call into the one app.
             resp = await client.post(
                 f"{settings.rag_base_url.rstrip('/')}/v1/query",
                 json={"query": question, "top_k": 3},

@@ -41,8 +41,12 @@ async def ingest_call(
         llm_model: Groq model name used.
         voice_id: Cartesia voice ID used.
     """
-    if not settings.voxscope_api_key:
-        return
+    # The unified backend manages observability internally: if no explicit
+    # ingest key is configured, fall back to the deterministic workspace key so
+    # the worker can ship telemetry to /observability/v1/ingest/batch with no
+    # manual key wiring.
+    from voiceagent.integrations import default_ingest_key
+    ingest_key = settings.voxscope_api_key or default_ingest_key()
 
     try:
         batch = _build_batch(
@@ -62,7 +66,7 @@ async def ingest_call(
             resp = await client.post(
                 f"{settings.voxscope_url.rstrip('/')}/v1/ingest/batch",
                 json=batch,
-                headers={"Authorization": f"Bearer {settings.voxscope_api_key}"},
+                headers={"Authorization": f"Bearer {ingest_key}"},
             )
             if resp.status_code == 202:
                 logger.info(f"[observability] ingested call {call_id} — {len(turns)} turns")

@@ -1,0 +1,111 @@
+# Unified Convoxio platform — ONE deployable for voice agents + RAG + observability.
+#
+#   api       FastAPI app (voiceagent + /rag + /observability) on :8000
+#   worker    LiveKit voice worker (Pipecat pipeline; talks to api over HTTP)
+#   frontend  Next.js dashboard on :3000
+#   postgres  one database; rag/obs tables live in dedicated schemas
+#   qdrant    vector store for RAG
+#   redis     RAG query cache + rate limiting
+#
+# All three modules read the SAME .env (one DATABASE_URL, one JWT_SECRET).
+services:
+  api:
+    build: .
+    dns:
+      - "8.8.8.8"
+      - "1.1.1.1"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voiceagent:voiceagent@postgres:5432/voiceagent
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_PREFER_GRPC: "false"
+      REDIS_URL: redis://redis:6379/0
+      # Mounted RAG/obs modules are served in-process; the worker reaches them
+      # over the internal network at the api service.
+      RAG_BASE_URL: http://api:8000/rag
+      VOXSCOPE_URL: http://api:8000/observability
+      HF_HUB_DISABLE_XET: "1"
+      FASTEMBED_CACHE_PATH: /models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./storage:/app/storage
+      - ./recordings:/app/recordings
+      - ./media:/app/media
+      - fastembed_cache:/models
+
+  worker:
+    build: .
+    command: ["python", "worker.py", "dev"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voiceagent:voiceagent@postgres:5432/voiceagent
+      # Worker is a separate process; it calls the unified api over HTTP.
+      RAG_BASE_URL: http://api:8000/rag
+      VOXSCOPE_URL: http://api:8000/observability
+      PYTHONPATH: /app/src
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./recordings:/app/recordings
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: voiceagent
+      POSTGRES_PASSWORD: voiceagent
+      POSTGRES_DB: voiceagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voiceagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  fastembed_cache:

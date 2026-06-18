@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from voiceagent.config import settings
 from voiceagent.db.models import AgentConfig
 from voiceagent.db.session import get_session
+from voiceagent.integrations import ensure_rag_key_for_kb
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -49,12 +50,30 @@ class AgentConfigResponse(BaseModel):
     llm_model: Optional[str]
     tools_json: Optional[str]
     sip_trunk_id: Optional[str]
-    rag_api_key: Optional[str]
+    # The rag_api_key is managed server-side and intentionally NOT exposed.
+    # rag_enabled tells the UI whether a knowledge base is wired up.
     rag_kb_id: Optional[str]
+    rag_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_agent(cls, agent: "AgentConfig") -> "AgentConfigResponse":
+        return cls(
+            id=agent.id,
+            name=agent.name,
+            system_prompt=agent.system_prompt,
+            voice_id=agent.voice_id,
+            llm_model=agent.llm_model,
+            tools_json=agent.tools_json,
+            sip_trunk_id=agent.sip_trunk_id,
+            rag_kb_id=agent.rag_kb_id,
+            rag_enabled=bool(agent.rag_api_key and agent.rag_kb_id),
+            created_at=agent.created_at,
+            updated_at=agent.updated_at,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +85,7 @@ class AgentConfigResponse(BaseModel):
 async def list_agents(session: AsyncSession = Depends(get_session)):
     """Return all agent configurations."""
     result = await session.execute(select(AgentConfig))
-    return result.scalars().all()
+    return [AgentConfigResponse.from_agent(a) for a in result.scalars().all()]
 
 
 @router.post("", response_model=AgentConfigResponse, status_code=201)
@@ -74,8 +93,20 @@ async def create_agent(
     body: AgentConfigCreate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Create a new agent configuration."""
+    """Create a new agent configuration.
+
+    If a knowledge base is attached (``rag_kb_id``), a managed RAG API key is
+    minted automatically so the voice pipeline can query it — the client never
+    supplies a key.
+    """
     now = datetime.now(UTC)
+    rag_kb_id = (body.rag_kb_id or "").strip() or None
+    rag_api_key = None
+    if rag_kb_id:
+        rag_api_key = await ensure_rag_key_for_kb(rag_kb_id)
+        if rag_api_key is None:
+            raise HTTPException(status_code=400, detail="Knowledge base not found")
+
     agent = AgentConfig(
         id=str(uuid.uuid4()),
         name=body.name,
@@ -84,15 +115,15 @@ async def create_agent(
         llm_model=body.llm_model or settings.groq_model,
         tools_json=body.tools_json,
         sip_trunk_id=body.sip_trunk_id or settings.livekit_sip_trunk_id,
-        rag_api_key=body.rag_api_key,
-        rag_kb_id=body.rag_kb_id,
+        rag_api_key=rag_api_key,
+        rag_kb_id=rag_kb_id,
         created_at=now,
         updated_at=now,
     )
     session.add(agent)
     await session.commit()
     await session.refresh(agent)
-    return agent
+    return AgentConfigResponse.from_agent(agent)
 
 
 @router.get("/options/voices")
@@ -138,7 +169,7 @@ async def get_agent(
     agent = await session.get(AgentConfig, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return agent
+    return AgentConfigResponse.from_agent(agent)
 
 
 @router.patch("/{agent_id}", response_model=AgentConfigResponse)
@@ -147,19 +178,38 @@ async def update_agent(
     body: AgentConfigUpdate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Partially update an agent configuration. Omitted fields are not changed."""
+    """Partially update an agent configuration. Omitted fields are not changed.
+
+    Attaching/detaching a knowledge base (``rag_kb_id``) automatically mints or
+    clears the managed RAG API key — the client never supplies a key.
+    """
     agent = await session.get(AgentConfig, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     update_data = body.model_dump(exclude_unset=True)
+    # rag_api_key is server-managed; never accept it from the client.
+    update_data.pop("rag_api_key", None)
+
+    # Knowledge-base attachment drives the managed key.
+    if "rag_kb_id" in update_data:
+        new_kb = (update_data.get("rag_kb_id") or "").strip() or None
+        update_data["rag_kb_id"] = new_kb
+        if new_kb and new_kb != agent.rag_kb_id:
+            minted = await ensure_rag_key_for_kb(new_kb)
+            if minted is None:
+                raise HTTPException(status_code=400, detail="Knowledge base not found")
+            agent.rag_api_key = minted
+        elif not new_kb:
+            agent.rag_api_key = None
+
     for field, value in update_data.items():
         setattr(agent, field, value)
     agent.updated_at = datetime.now(UTC)
 
     await session.commit()
     await session.refresh(agent)
-    return agent
+    return AgentConfigResponse.from_agent(agent)
 
 
 @router.delete("/{agent_id}", status_code=204)
