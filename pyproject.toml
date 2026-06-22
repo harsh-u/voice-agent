@@ -36,6 +36,11 @@ dependencies = [
     "pypdf>=4.0.0",
     "python-docx>=1.1.0",
     # --- Merged observability engine (voxscope) uses fastapi/sqlalchemy/httpx (already present) ---
+    "livekit-plugins-deepgram>=1.5.14",
+    "livekit-plugins-cartesia>=1.5.14",
+    "livekit-plugins-silero>=1.5.14",
+    "livekit-plugins-turn-detector>=1.5.14",
+    "livekit-plugins-groq>=1.5.14",
 ]
 
 [build-system]

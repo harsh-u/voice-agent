@@ -5,7 +5,6 @@ from loguru import logger
 from voiceagent.config import settings
 from voiceagent.db.models import Call, TranscriptTurn, CallStatus
 from voiceagent.db.session import AsyncSessionLocal
-from voiceagent.pipeline.bot import run_pipeline
 from voiceagent.telephony.livekit_sip import generate_bot_token
 from voiceagent.agent.prompts import build_system_prompt
 from voiceagent.observability.client import ingest_call
@@ -15,6 +14,7 @@ async def run_agent(
     call_id: str,
     room_name: str,
     agent_config: dict | None,
+    to_number: str | None = None,
 ) -> None:
     """Per-call orchestrator that connects the pipeline to a LiveKit room and
     persists the resulting transcript, recording, and cost data.
@@ -32,6 +32,15 @@ async def run_agent(
     llm_model = cfg.get("llm_model") or settings.groq_model
     rag_api_key = cfg.get("rag_api_key") or None
     bot_token = generate_bot_token(room_name)
+
+    # Select the voice engine (Pipecat or LiveKit Agents) — imported lazily so a
+    # half-installed engine never breaks the other path. Both expose the same
+    # run_pipeline(...) signature, so everything below is engine-agnostic.
+    if settings.voice_engine == "livekit":
+        from voiceagent.pipeline.bot_livekit import run_pipeline
+    else:
+        from voiceagent.pipeline.bot import run_pipeline
+    logger.info(f"voice_engine={settings.voice_engine}")
 
     logger.info(
         f"run_agent call_id={call_id} room={room_name} "
@@ -65,6 +74,7 @@ async def run_agent(
             on_turn_end=on_turn_end,
             on_recording_saved=on_recording_saved,
             rag_api_key=rag_api_key,
+            to_number=to_number,
         )
     except Exception as exc:
         logger.error(f"Pipeline error call_id={call_id}: {exc}")

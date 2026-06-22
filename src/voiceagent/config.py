@@ -19,14 +19,20 @@ class Settings(BaseSettings):
     deepgram_api_key: str = ""
     deepgram_model: str = "nova-3"
 
-    # LLM
+    # LLM — default to 70b: it reliably executes function/tool calls (RAG),
+    # whereas llama-3.1-8b-instant fails the tool->answer follow-up and leaks
+    # raw tool markup into speech.
     groq_api_key: str = ""
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "llama-3.3-70b-versatile"
 
     # TTS
     cartesia_api_key: str = ""
     cartesia_voice_id: str = "a0e99841-438c-4a64-b679-ae501e7d6091"
     cartesia_model: str = "sonic-2024-10-19"
+
+    # Voice engine: "pipecat" (default) or "livekit" (LiveKit Agents). Selects
+    # which pipeline implementation run_agent uses. See bot.py vs bot_livekit.py.
+    voice_engine: str = "pipecat"
 
     # Database
     database_url: str = "postgresql+asyncpg://localhost/voice_agent"

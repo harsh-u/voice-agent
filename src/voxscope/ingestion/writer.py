@@ -119,6 +119,8 @@ async def _write_batch(
                 started_at=turn_data.started_at or datetime.now(UTC),
                 ended_at=turn_data.ended_at,
                 interrupted=turn_data.interrupted,
+                response_latency_ms=turn_data.response_latency_ms,
+                ttfb_ms=turn_data.ttfb_ms,
             )
             session.add(turn_row)
         else:
@@ -130,6 +132,10 @@ async def _write_batch(
                 existing_turn.agent_transcript = turn_data.agent_transcript
             if turn_data.interrupted:
                 existing_turn.interrupted = True
+            if turn_data.response_latency_ms is not None:
+                existing_turn.response_latency_ms = turn_data.response_latency_ms
+            if turn_data.ttfb_ms is not None:
+                existing_turn.ttfb_ms = turn_data.ttfb_ms
         turn_ids_written.add(turn_id)
 
     await session.flush()
@@ -250,6 +256,11 @@ async def _compute_turn_latency(session: AsyncSession, turn_id: str) -> None:
     """
     turn = await session.get(Turn, turn_id)
     if turn is None:
+        return
+
+    # If the SDK supplied an explicit response latency, trust it and skip the
+    # span-derived estimate (which needs VAD/TTS span timings we may not have).
+    if turn.response_latency_ms is not None:
         return
 
     # Load all spans for this turn

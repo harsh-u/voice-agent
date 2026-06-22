@@ -42,6 +42,8 @@ async def _load_inbound_agent_config() -> dict | None:
             "system_prompt": ac.system_prompt,
             "voice_id": ac.voice_id,
             "llm_model": ac.llm_model,
+            "rag_api_key": ac.rag_api_key,
+            "rag_kb_id": ac.rag_kb_id,
         }
 
 

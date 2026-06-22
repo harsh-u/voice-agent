@@ -124,6 +124,10 @@ async def create_outbound_call(
             "system_prompt": ac.system_prompt,
             "voice_id": ac.voice_id,
             "llm_model": ac.llm_model,
+            # Without these the pipeline can't enable RAG: the query_knowledge_base
+            # tool is never registered, so the agent goes silent on KB questions.
+            "rag_api_key": ac.rag_api_key,
+            "rag_kb_id": ac.rag_kb_id,
         }
 
     room_name = f"call-{uuid.uuid4().hex[:12]}"
@@ -151,17 +155,12 @@ async def create_outbound_call(
     session.add(call)
     await session.commit()
 
-    # Dial the SIP leg
-    try:
-        await dial_outbound(body.to_number, room_name)
-    except Exception as exc:
-        logger.error(f"SIP dial failed for call {call_id}: {exc}")
-        call.status = CallStatus.failed
-        await session.commit()
-        raise HTTPException(status_code=502, detail=f"SIP dial failed: {exc}")
-
-    # Run the voice pipeline as a background task — detached from this request
-    asyncio.create_task(run_agent(call_id, room_name, agent_cfg))
+    # Run the voice pipeline as a background task — detached from this request.
+    # The SIP leg is dialed from inside the pipeline once the bot has joined the
+    # room (see run_pipeline.on_connected), so the phone only rings when the
+    # agent is already present — this avoids the brief "ghost"/missed call that
+    # happens when the callee answers before the bot is in the room.
+    asyncio.create_task(run_agent(call_id, room_name, agent_cfg, to_number=body.to_number))
     logger.info(
         f"Outbound call {call_id} → {body.to_number} — pipeline task spawned "
         f"(agent_config_id={body.agent_config_id})"

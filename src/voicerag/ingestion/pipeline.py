@@ -57,10 +57,12 @@ async def ingest_document(document_id: str) -> None:
                 batch = chunks[batch_start: batch_start + batch_size]
                 texts = [c.text for c in batch]
 
-                dense_vecs = embedder.embed_documents(texts)
+                # Offload CPU-bound embedding to a thread so it never blocks the
+                # event loop (which also runs live voice calls in this process).
+                dense_vecs = await asyncio.to_thread(embedder.embed_documents, texts)
                 sparse_vecs = None
                 if kb.enable_hybrid and settings.enable_hybrid:
-                    sparse_vecs = embedder.embed_sparse(texts)
+                    sparse_vecs = await asyncio.to_thread(embedder.embed_sparse, texts)
 
                 points = []
                 for j, c in enumerate(batch):

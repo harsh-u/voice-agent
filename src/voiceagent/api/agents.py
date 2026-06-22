@@ -142,19 +142,19 @@ async def list_models():
     """Return the supported LLM models with cost/latency characteristics."""
     return [
         {
-            "id": "llama-3.1-8b-instant",
-            "name": "Llama 3.1 8B (Fast & Cheap)",
-            "provider": "groq",
-            "ttft_ms": 120,
-            "cost_per_min_cents": 0.40,
-            "recommended": True,
-        },
-        {
             "id": "llama-3.3-70b-versatile",
-            "name": "Llama 3.3 70B (High Quality)",
+            "name": "Llama 3.3 70B (Recommended — reliable tools/RAG)",
             "provider": "groq",
             "ttft_ms": 200,
             "cost_per_min_cents": 1.80,
+            "recommended": True,
+        },
+        {
+            "id": "llama-3.1-8b-instant",
+            "name": "Llama 3.1 8B (Fast & Cheap — no knowledge base)",
+            "provider": "groq",
+            "ttft_ms": 120,
+            "cost_per_min_cents": 0.40,
             "recommended": False,
         },
     ]

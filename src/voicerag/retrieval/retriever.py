@@ -108,11 +108,14 @@ async def retrieve(
             _fire_log(kb.id, api_key_id, query, result)
             return result
 
-    # 2. Embed
-    dense_vec = embedder.embed_query(normalized)
+    # 2. Embed — fastembed is synchronous/CPU-bound, so run it in a worker
+    #    thread. Critical: outbound voice calls run the Pipecat pipeline in the
+    #    same asyncio event loop as this API, so embedding on the loop would
+    #    freeze all audio (agent goes silent) until it finishes.
+    dense_vec = await asyncio.to_thread(embedder.embed_query, normalized)
     sparse_vec = None
     if use_hybrid:
-        sparse_vecs = embedder.embed_sparse([normalized])
+        sparse_vecs = await asyncio.to_thread(embedder.embed_sparse, [normalized])
         sparse_vec = sparse_vecs[0] if sparse_vecs else None
 
     # 3. Qdrant search

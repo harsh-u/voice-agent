@@ -131,6 +131,9 @@ def _build_batch(
                 "role": "agent",
                 "agent_transcript": text,
                 "started_at": trace_started.isoformat(),
+                # Response latency (end-of-user-speech → assistant response).
+                "response_latency_ms": float(latency_ms) if latency_ms else None,
+                "ttfb_ms": float(latency_ms) if latency_ms else None,
             })
             # LLM span per assistant turn — latency_ms is TTFT proxy
             if latency_ms is not None:
@@ -187,7 +190,7 @@ def _build_batch(
         "trace": {
             "trace_id": call_id,
             "external_call_id": call_id,
-            "framework": "pipecat",
+            "framework": settings.voice_engine,
             "started_at": trace_started.isoformat(),
             "ended_at": trace_ended.isoformat(),
             "status": "completed",

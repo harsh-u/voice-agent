@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import wave
 from pathlib import Path
@@ -19,7 +20,8 @@ from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.frames.frames import TTSSpeakFrame, TextFrame
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 
 from voiceagent.agent.tools import build_tools
@@ -28,6 +30,29 @@ from voiceagent.config import settings
 
 RECORDINGS_DIR = Path("recordings")
 RECORDINGS_DIR.mkdir(exist_ok=True)
+
+
+# Defense-in-depth: strip any function/tool-call markup from text headed to TTS,
+# so raw tool syntax is never spoken even if a model misbehaves. With a
+# tool-capable model the LLM emits structured tool calls (no text markup), but
+# this guarantees the caller never hears "query_knowledge_base > {...}".
+_TOOL_MARKUP_RE = re.compile(
+    r"</?function[^>]*>|\b(?:query_knowledge_base|end_call|transfer_to_human)\b\s*>?\s*(?:\{[^}]*\})?",
+    re.IGNORECASE,
+)
+
+
+class ToolMarkupFilter(FrameProcessor):
+    """Removes leaked tool-call markup from TextFrames before they reach TTS."""
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TextFrame) and frame.text:
+            cleaned = _TOOL_MARKUP_RE.sub("", frame.text)
+            if cleaned != frame.text:
+                logger.warning(f"[tts-guard] stripped tool markup from TTS text: {frame.text[:80]!r}")
+                frame.text = cleaned
+        await self.push_frame(frame, direction)
 
 
 async def run_pipeline(
@@ -40,6 +65,7 @@ async def run_pipeline(
     on_turn_end: Callable[[str, str, int | None], Any] | None = None,
     on_recording_saved: Callable[[str], Awaitable[None]] | None = None,
     rag_api_key: str | None = None,
+    to_number: str | None = None,
 ) -> None:
     """Build and run a Pipecat voice pipeline connected to a LiveKit room.
 
@@ -96,19 +122,9 @@ async def run_pipeline(
     context.set_messages([{"role": "system", "content": system_prompt}])
     context.set_tools(build_tools(rag_enabled=bool(rag_api_key)))
     context_pair = LLMContextAggregatorPair(context)
-
-    # Register RAG handler when the agent has a knowledge base configured
-    if rag_api_key:
-        from voiceagent.rag.client import query as rag_query
-        from pipecat.services.llm_service import FunctionCallParams
-
-        async def _rag_handler(params: FunctionCallParams) -> None:
-            question = params.arguments.get("question", "")
-            logger.info(f"[rag] query: {question[:80]}")
-            answer = await rag_query(question, rag_api_key)
-            await params.result_callback(answer)
-
-        llm.register_function("query_knowledge_base", _rag_handler)
+    # RAG handler is registered after `task` is created (below) so it can speak a
+    # filler frame immediately — otherwise the ~3-4s lookup is dead air, which the
+    # caller hears as silence and often talks over (interrupting the answer).
 
     transcript_collector = LLMFullResponseAggregator()
 
@@ -118,6 +134,8 @@ async def run_pipeline(
     user_recorder = AudioBufferProcessor(num_channels=1)
     bot_recorder = AudioBufferProcessor(num_channels=1)
 
+    markup_filter = ToolMarkupFilter()
+
     pipeline = Pipeline([
         transport.input(),
         user_recorder,
@@ -126,6 +144,7 @@ async def run_pipeline(
         context_pair.user(),
         llm,
         transcript_collector,
+        markup_filter,
         tts,
         transport.output(),
         bot_recorder,
@@ -134,9 +153,53 @@ async def run_pipeline(
 
     task = PipelineTask(pipeline)
 
+    # Register handlers for the always-available tools so native tool calls
+    # resolve cleanly (registered after `task` exists so they can end the call).
+    from pipecat.services.llm_service import FunctionCallParams
+
+    async def _end_call_handler(params: FunctionCallParams) -> None:
+        await params.result_callback({"status": "ending"})
+
+        async def _graceful_end() -> None:
+            await task.queue_frames([TTSSpeakFrame("Thank you for calling. Goodbye!")])
+            await asyncio.sleep(3.0)
+            await task.cancel()
+
+        asyncio.create_task(_graceful_end())
+
+    async def _transfer_handler(params: FunctionCallParams) -> None:
+        # No live-transfer infra yet; acknowledge so the LLM keeps assisting
+        # instead of emitting raw markup.
+        await params.result_callback(
+            {"status": "unavailable", "message": "Live transfer isn't available; continue helping the caller."}
+        )
+
+    llm.register_function("end_call", _end_call_handler)
+    llm.register_function("transfer_to_human", _transfer_handler)
+
+    # RAG: speak an immediate filler so the caller hears something during the
+    # lookup (no dead air → no accidental interruption), then return the answer.
+    if rag_api_key:
+        from voiceagent.rag.client import query as rag_query
+
+        async def _rag_handler(params: FunctionCallParams) -> None:
+            question = params.arguments.get("question", "")
+            logger.info(f"[rag] query: {question[:80]}")
+            filler = "Sure, let me check that for you."
+            await task.queue_frames([TTSSpeakFrame(filler)])
+            # Record the filler so the transcript matches what the caller hears
+            # (directly-queued TTS bypasses the LLM transcript aggregator).
+            if on_turn_end:
+                await on_turn_end("assistant", filler, None)
+            answer = await rag_query(question, rag_api_key)
+            await params.result_callback(answer)
+
+        llm.register_function("query_knowledge_base", _rag_handler)
+
     # Track when the user stopped speaking to measure response latency
     _turn_start_time: list[float | None] = [None]
     _greeted: list[bool] = [False]
+    _dialed: list[bool] = [False]
     _user_audio: list[tuple[bytes, int] | None] = [None]  # (audio, sample_rate)
     _bot_audio: list[tuple[bytes, int] | None] = [None]
 
@@ -149,9 +212,12 @@ async def run_pipeline(
         await asyncio.sleep(0.3)
         await user_recorder.start_recording()
         await bot_recorder.start_recording()
-        await task.queue_frames([
-            TTSSpeakFrame("Hi! This is your AI assistant. How can I help you today?")
-        ])
+        greeting = "Hi! This is your AI assistant. How can I help you today?"
+        await task.queue_frames([TTSSpeakFrame(greeting)])
+        # Record the greeting so it appears in the transcript (it's spoken via a
+        # direct TTS frame that bypasses the LLM transcript aggregator).
+        if on_turn_end:
+            await on_turn_end("assistant", greeting, None)
 
     @transport.event_handler("on_connected")
     async def on_connected(transport: LiveKitTransport):
@@ -178,6 +244,17 @@ async def run_pipeline(
             if status == "active":
                 await _fire_greeting(f"existing active SIP participant {p.identity}")
                 break
+
+        # Outbound: the bot is now in the room — dial the SIP leg so the phone
+        # rings with the agent already present (avoids the ghost/missed call).
+        if to_number and not _dialed[0]:
+            _dialed[0] = True
+            from voiceagent.telephony.livekit_sip import dial_outbound
+            try:
+                await dial_outbound(to_number, room_name)
+            except Exception as exc:
+                logger.error(f"Outbound SIP dial failed (in-pipeline) for {room_name}: {exc}")
+                await task.cancel()
 
     @transport.event_handler("on_audio_track_subscribed")
     async def on_audio_track_subscribed(transport: LiveKitTransport, participant_id: str):

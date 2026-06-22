@@ -74,17 +74,26 @@ async def dial_outbound(to_number: str, room_name: str) -> str:
 def generate_bot_token(room_name: str) -> str:
     """Generate a LiveKit JWT token for the bot participant.
 
+    Uses the LiveKit server API directly (no Pipecat dependency) so it works for
+    both the Pipecat and LiveKit Agents engines.
+
     Args:
         room_name: The room the bot should join.
 
     Returns:
         A signed JWT string.
     """
-    from pipecat.runner.livekit import generate_token_with_agent
-
-    return generate_token_with_agent(
-        room_name=room_name,
-        participant_name="voice-bot",
-        api_key=settings.livekit_api_key,
-        api_secret=settings.livekit_api_secret,
+    token = (
+        api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity("voice-bot")
+        .with_name("voice-bot")
+        .with_grants(
+            api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+            )
+        )
     )
+    return token.to_jwt()

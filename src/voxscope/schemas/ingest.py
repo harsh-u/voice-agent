@@ -133,6 +133,10 @@ class IngestTurn(BaseModel):
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     interrupted: bool = False
+    # Optional explicit latency from the SDK (used directly when provided,
+    # otherwise the writer derives it from spans).
+    response_latency_ms: Optional[float] = None
+    ttfb_ms: Optional[float] = None
 
 
 class IngestTrace(BaseModel):

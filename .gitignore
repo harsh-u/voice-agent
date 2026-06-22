@@ -19,6 +19,9 @@ wheels/
 recordings/
 media/
 
+# RAG document storage (runtime-ingested files)
+storage/
+
 # Next.js build output
 frontend/.next/
 frontend/node_modules/
